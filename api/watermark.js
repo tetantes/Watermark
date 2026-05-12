@@ -1,55 +1,73 @@
-const sharp = require('sharp');
+const { createCanvas, GlobalFonts } = require('@napi-rs/canvas');
+const path = require('path');
 
-export default async function handler(req, res) {
-  if (req.method !== 'POST' && req.method !== 'GET') {
-    return res.status(405).send('Method Not Allowed');
-  }
-
-  try {
-    // 1. Get the image (from URL or Buffer)
-    const imageUrl = req.query.url || req.body.url;
-    const watermarkText = req.query.text || "WATERMARK";
-    
-    const response = await fetch(imageUrl);
-    const inputBuffer = Buffer.from(await response.arrayBuffer());
-
-    // 2. Get image dimensions
-    const metadata = await sharp(inputBuffer).metadata();
-    const { width, height } = metadata;
-
-    // 3. Create the SVG Watermark Overlay
-    // This creates a grid of slanted text
-    const svgOverlay = `
-      <svg width="${width}" height="${height}">
-        <style>
-          .text { 
-            fill: rgba(255, 255, 255, 0.3); 
-            font-size: 40px; 
-            font-family: sans-serif; 
-            font-weight: bold; 
-          }
-        </style>
-        <defs>
-          <pattern id="watermark-pattern" width="200" height="200" patternUnits="userSpaceOnUse" patternTransform="rotate(-30)">
-            <text x="0" y="50" class="text">${watermarkText}</text>
-          </pattern>
-        </defs>
-        <rect width="100%" height="100%" fill="url(#watermark-pattern)" />
-      </svg>
-    `;
-
-    // 4. Composite the SVG over the image
-    const outputBuffer = await sharp(inputBuffer)
-      .composite([{ input: Buffer.from(svgOverlay), top: 0, left: 0 }])
-      .png() // or .jpeg()
-      .toBuffer();
-
-    // 5. Return the image
-    res.setHeader('Content-Type', 'image/png');
-    res.status(200).send(outputBuffer);
-
-  } catch (error) {
-    console.error(error);
-    res.status(500).send('Error processing image');
-  }
+// Font registration - using your project's structure
+const fontPath = path.join(process.cwd(), 'fonts', 'Roboto-Bold.ttf');
+try {
+    GlobalFonts.registerFromPath(fontPath, 'WatermarkFont');
+} catch (err) {
+    console.error("Font loading failed:", err);
 }
+
+module.exports = async function handler(req, res) {
+    // CORS Headers from your example
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    
+    if (req.method === 'OPTIONS') return res.status(200).end();
+
+    try {
+        const imageUrl = req.query.url || (req.body && req.body.url);
+        const text = req.query.text || "WATERMARK";
+
+        if (!imageUrl) {
+            return res.status(400).json({ error: "Missing image URL" });
+        }
+
+        // Fetch the image
+        const response = await fetch(imageUrl);
+        const arrayBuffer = await response.arrayBuffer();
+        const inputBuffer = Buffer.from(arrayBuffer);
+
+        // We use an image object to get dimensions for the canvas
+        const img = new (require('@napi-rs/canvas').Image)();
+        img.src = inputBuffer;
+
+        const width = img.width;
+        const height = img.height;
+        const canvas = createCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+
+        // Draw the original image first
+        ctx.drawImage(img, 0, 0, width, height);
+
+        // Watermark Style
+        ctx.font = 'bold 30px WatermarkFont';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.3)'; // Semi-transparent white
+        ctx.textAlign = 'center';
+
+        // Tiling Logic: Draw slanted text in a grid
+        const angle = -30 * Math.PI / 180;
+        ctx.rotate(angle);
+
+        const spacingX = 200;
+        const spacingY = 150;
+
+        // Loop to cover the entire canvas area even when rotated
+        for (let x = -width; x < width * 2; x += spacingX) {
+            for (let y = -height; y < height * 2; y += spacingY) {
+                ctx.fillText(text, x, y);
+            }
+        }
+
+        const outputBuffer = canvas.toBuffer('image/png');
+
+        res.setHeader('Content-Type', 'image/png');
+        res.status(200).send(outputBuffer);
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, message: 'Image processing failed' });
+    }
+};
